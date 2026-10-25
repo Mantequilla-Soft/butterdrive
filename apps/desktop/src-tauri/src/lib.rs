@@ -26,6 +26,23 @@ struct AppState {
     // the OS keychain a second time on every launch — each keychain read is
     // its own macOS authorization prompt on an unsigned dev build.
     has_account: std::sync::atomic::AtomicBool,
+    // The currently-running engine's background tasks (its run() loop and
+    // its event-forwarding loop). Replacing `engine` above does NOT stop
+    // these on its own — an Arc clone is already captured inside each
+    // spawned task, independent of what AppState.engine points to — so a
+    // reconnect or sign-out must abort these explicitly or the old engine
+    // keeps polling with stale credentials forever, its errors mixed into
+    // the same event stream the new (or no) engine uses.
+    engine_tasks: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+/// Stops whatever engine is currently running (if any) so a fresh one can
+/// start, or so nothing keeps running after sign-out.
+async fn stop_engine(state: &AppState) {
+    *state.engine.lock().await = None;
+    for task in state.engine_tasks.lock().await.drain(..) {
+        task.abort();
+    }
 }
 
 fn sync_root(app: &AppHandle) -> PathBuf {
@@ -103,8 +120,12 @@ fn handle_engine_event(app: &AppHandle, event: EngineEvent) {
 
 /// Starts (or restarts) the sync engine for a saved account and wires its
 /// event stream into the UI. Safe to call again after `onboard` changes the
-/// account, since each call replaces the previous engine.
+/// account: stops whatever engine was previously running first, so its
+/// background tasks don't keep polling with stale credentials.
 async fn start_engine(app: AppHandle, cfg: AccountConfig) -> Result<(), String> {
+    let app_state: State<AppState> = app.state();
+    stop_engine(&app_state).await;
+
     let root = sync_root(&app);
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
@@ -113,11 +134,10 @@ async fn start_engine(app: AppHandle, cfg: AccountConfig) -> Result<(), String> 
     let (engine, mut events) = SyncEngine::new(client, state_db, root, POLL_INTERVAL);
     let engine = Arc::new(engine);
 
-    let app_state: State<AppState> = app.state();
     *app_state.engine.lock().await = Some(engine.clone());
 
     let run_handle = app.clone();
-    tauri::async_runtime::spawn(async move {
+    let run_task = tauri::async_runtime::spawn(async move {
         if let Err(e) = engine.run().await {
             let _ = run_handle.emit(
                 "engine-event",
@@ -127,11 +147,13 @@ async fn start_engine(app: AppHandle, cfg: AccountConfig) -> Result<(), String> 
     });
 
     let events_handle = app.clone();
-    tauri::async_runtime::spawn(async move {
+    let events_task = tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
             handle_engine_event(&events_handle, event);
         }
     });
+
+    *app_state.engine_tasks.lock().await = vec![run_task, events_task];
 
     Ok(())
 }
@@ -161,7 +183,7 @@ async fn onboard(
 
 #[tauri::command]
 async fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
-    *state.engine.lock().await = None;
+    stop_engine(&state).await;
     creds::clear().map_err(|e| e.to_string())?;
     state
         .has_account
@@ -281,6 +303,7 @@ pub fn run() {
         .manage(AppState {
             engine: tokio::sync::Mutex::new(None),
             has_account: std::sync::atomic::AtomicBool::new(false),
+            engine_tasks: tokio::sync::Mutex::new(Vec::new()),
         })
         .invoke_handler(tauri::generate_handler![
             has_account,
