@@ -33,6 +33,15 @@
   box-sizing: border-box;
 }
 
+/* Author-stylesheet `display` rules (e.g. `.onboarding { display: flex }`)
+   outrank the user-agent stylesheet's `[hidden] { display: none }` in the
+   cascade regardless of selector specificity — so toggling the `hidden`
+   attribute silently does nothing on any element whose own class also sets
+   `display`. This makes `hidden` win unconditionally. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: linear-gradient(180deg, var(--cream-100), var(--cream-50) 220px);
