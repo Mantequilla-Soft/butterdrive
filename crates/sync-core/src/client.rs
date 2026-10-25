@@ -54,9 +54,8 @@ impl ButtercloudClient {
     ///
     /// Deliberately uses `ListObjectsV2` rather than `HEAD bucket`: HTTP HEAD
     /// responses never carry a body, so a HEAD failure gives
-    /// `classify_sdk_error` nothing to read and it can only guess
-    /// `InvalidCredentials` — masking the real cause (quota, suspension, a
-    /// genuinely bad key) behind a wrong message.
+    /// `classify_sdk_error` nothing to read and it can't tell the real cause
+    /// (quota, suspension, a bad key) from anything else.
     pub async fn validate(&self) -> Result<(), SyncError> {
         self.s3
             .list_objects_v2()
@@ -177,11 +176,10 @@ fn is_not_found<E>(err: &aws_sdk_s3::error::SdkError<E, HttpResponse>) -> bool {
 }
 
 /// Pulls the raw response body off any SDK error and checks it against
-/// Buttercloud's custom `QuotaExceeded`/`AccountSuspended` 403 bodies before
-/// falling back to a generic error. The exact body shape here is the thing
-/// the Phase 2 spike against a real account needs to confirm — this is a
-/// best-effort reading of the handoff doc's `Code: '...'` description until
-/// then.
+/// Buttercloud's custom 403 bodies before falling back to a generic error.
+/// A HEAD response never carries a body (HTTP spec), so a HEAD 403 always
+/// falls through to `Other` — callers that need a specific reason should
+/// prefer a GET/LIST-based call (see `validate`).
 fn classify_sdk_error<E: std::fmt::Debug>(
     err: aws_sdk_s3::error::SdkError<E, HttpResponse>,
 ) -> SyncError {
@@ -201,7 +199,7 @@ fn classify_sdk_error<E: std::fmt::Debug>(
                 && let Some(classified) = body.classify() {
                     return classified;
                 }
-        return SyncError::InvalidCredentials;
+        return SyncError::Other(format!("access denied (403): {err}"));
     }
 
     SyncError::Other(format!("{err}"))

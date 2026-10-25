@@ -1,7 +1,7 @@
 use std::fmt;
 
-/// Buttercloud's two documented custom 403 codes, plus the generic S3 error
-/// surface. Branch on `Quota`/`Suspended` for user-facing messages; treat
+/// Buttercloud's documented custom 403 codes, plus the generic S3 error
+/// surface. Branch on the specific variants for user-facing messages; treat
 /// `Other` as a normal transfer failure.
 #[derive(Debug, Clone)]
 pub enum SyncError {
@@ -10,8 +10,17 @@ pub enum SyncError {
     /// Invoice overdue past the grace period (`Code: 'AccountSuspended'`).
     /// Reads/deletes of the user's own data still work; new uploads don't.
     AccountSuspended,
-    /// Credentials rejected by the gateway.
-    InvalidCredentials,
+    /// The access key itself isn't recognized (`Code: 'InvalidAccessKeyId'`)
+    /// — deleted/revoked server-side, or mistyped. Distinct from
+    /// `SignatureMismatch`: the gateway tells these apart, so we do too.
+    AccessKeyNotFound,
+    /// `Code: 'SignatureDoesNotMatch'`. Usually a wrong secret key — but this
+    /// gateway is also confirmed (as of 2026-10-25, reported upstream) to
+    /// reject correctly-signed requests whose object key needs
+    /// percent-encoding (spaces, apostrophes, `+`, ...). If this happens for
+    /// some files/folders but not others under the same account, it's that
+    /// bug, not a bad key.
+    SignatureMismatch,
     /// Anything else: transport failure, unexpected status, bad config, etc.
     Other(String),
 }
@@ -21,7 +30,13 @@ impl fmt::Display for SyncError {
         match self {
             SyncError::QuotaExceeded => write!(f, "storage quota exceeded"),
             SyncError::AccountSuspended => write!(f, "account suspended (overdue invoice)"),
-            SyncError::InvalidCredentials => write!(f, "invalid credentials"),
+            SyncError::AccessKeyNotFound => {
+                write!(f, "access key not found — it may have been deleted or revoked")
+            }
+            SyncError::SignatureMismatch => write!(
+                f,
+                "signature rejected — check the secret key, or this item's name may use characters the server doesn't accept yet (spaces, quotes, etc.)"
+            ),
             SyncError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -29,10 +44,8 @@ impl fmt::Display for SyncError {
 
 impl std::error::Error for SyncError {}
 
-/// Buttercloud's custom error body on its special 403s, e.g.
-/// `{"Code":"QuotaExceeded","Message":"..."}`. Exact shape isn't documented
-/// upstream — this is a best-effort reading of the handoff doc's `Code:
-/// '...'` description, to be confirmed against a real account.
+/// Buttercloud's custom error body on its 403s, e.g.
+/// `{"Code":"QuotaExceeded","Message":"..."}`.
 #[derive(Debug, serde::Deserialize)]
 pub struct ButtercloudErrorBody {
     #[serde(rename = "Code")]
@@ -46,6 +59,8 @@ impl ButtercloudErrorBody {
         match self.code.as_str() {
             "QuotaExceeded" => Some(SyncError::QuotaExceeded),
             "AccountSuspended" => Some(SyncError::AccountSuspended),
+            "InvalidAccessKeyId" => Some(SyncError::AccessKeyNotFound),
+            "SignatureDoesNotMatch" => Some(SyncError::SignatureMismatch),
             _ => None,
         }
     }
@@ -68,6 +83,20 @@ mod tests {
         let body: ButtercloudErrorBody =
             serde_json::from_str(r#"{"Code":"AccountSuspended"}"#).unwrap();
         assert!(matches!(body.classify(), Some(SyncError::AccountSuspended)));
+    }
+
+    #[test]
+    fn classifies_invalid_access_key_id() {
+        let body: ButtercloudErrorBody =
+            serde_json::from_str(r#"{"Code":"InvalidAccessKeyId"}"#).unwrap();
+        assert!(matches!(body.classify(), Some(SyncError::AccessKeyNotFound)));
+    }
+
+    #[test]
+    fn classifies_signature_does_not_match() {
+        let body: ButtercloudErrorBody =
+            serde_json::from_str(r#"{"Code":"SignatureDoesNotMatch"}"#).unwrap();
+        assert!(matches!(body.classify(), Some(SyncError::SignatureMismatch)));
     }
 
     #[test]

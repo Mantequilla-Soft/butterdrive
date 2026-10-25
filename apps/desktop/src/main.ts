@@ -5,7 +5,11 @@ type EngineEvent =
   | { kind: "uploaded"; key: string }
   | { kind: "downloaded"; key: string }
   | { kind: "pendingDelete"; key: string; originatedRemotely: boolean }
-  | { kind: "quotaExceeded" | "accountSuspended" | "invalidCredentials" | "error"; message: string };
+  | {
+      kind: "quotaExceeded" | "accountSuspended" | "accessKeyNotFound" | "signatureMismatch" | "error";
+      message: string;
+      key: string | null;
+    };
 
 const onboardingScreen = document.querySelector<HTMLElement>("#onboarding")!;
 const shell = document.querySelector<HTMLElement>("#shell")!;
@@ -197,14 +201,23 @@ function handleEngineEvent(event: EngineEvent) {
       showBanner("danger", "Account suspended", "An invoice is overdue. Reads and deletes still work, but new uploads are blocked until it's settled.", true);
       logActivity("error", "!", "Account suspended — invoice overdue");
       break;
-    case "invalidCredentials":
+    case "accessKeyNotFound":
       statusDot.classList.add("is-error");
-      showBanner("danger", "Credentials rejected", "Sign out and reconnect with a valid access key and secret key.", false);
-      logActivity("error", "!", "Credentials rejected");
+      showBanner("danger", "Access key not found", "Your access key was deleted or revoked. Sign out and reconnect with a new one.", false);
+      logActivity("error", "!", "Access key not found");
+      break;
+    case "signatureMismatch":
+      statusDot.classList.add("is-error");
+      if (event.key) {
+        logActivity("error", "!", `Rejected "${event.key}" — may contain unsupported characters (spaces, quotes)`);
+      } else {
+        showBanner("danger", "Signature rejected", "Check your secret key, or sign out and reconnect.", false);
+        logActivity("error", "!", "Signature rejected");
+      }
       break;
     case "error":
       statusDot.classList.add("is-error");
-      logActivity("error", "!", event.message);
+      logActivity("error", "!", event.key ? `"${event.key}": ${event.message}` : event.message);
       break;
   }
 }

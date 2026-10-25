@@ -2,7 +2,7 @@ use crate::client::ButtercloudClient;
 use crate::error::SyncError;
 use crate::state::{SyncState, SyncedObject};
 use crate::watcher::LocalWatcher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -19,7 +19,10 @@ pub enum EngineEvent {
     /// A delete was observed (locally or remotely) and is waiting on
     /// `SyncEngine::confirm_delete` / `cancel_delete` before it propagates.
     PendingDelete { key: String, originated_remotely: bool },
-    Error(SyncError),
+    /// `key` is the object this error was about, when there is one (most
+    /// errors are about a specific file; a few — like a failed remote
+    /// listing — aren't about any one key).
+    Error { key: Option<String>, error: SyncError },
 }
 
 pub struct SyncEngine {
@@ -29,6 +32,12 @@ pub struct SyncEngine {
     poll_interval: Duration,
     events_tx: mpsc::Sender<EngineEvent>,
     pending_deletes: Mutex<HashSet<String>>,
+    // Keyed by object key, value is the local mtime that last failed to
+    // upload. Lets a failing upload of the same unmodified file go quiet
+    // after the first report instead of re-failing (and re-notifying) every
+    // time the engine restarts and rescans — a new mtime (the user edited
+    // the file again) clears the entry and allows a fresh attempt.
+    failed_uploads: Mutex<HashMap<String, i64>>,
 }
 
 impl SyncEngine {
@@ -53,6 +62,7 @@ impl SyncEngine {
                 poll_interval,
                 events_tx,
                 pending_deletes: Mutex::new(HashSet::new()),
+                failed_uploads: Mutex::new(HashMap::new()),
             },
             events_rx,
         )
@@ -98,7 +108,7 @@ impl SyncEngine {
         };
         match result.and_then(|_| self.state.remove(key)) {
             Ok(()) => {}
-            Err(e) => self.emit_error(e).await,
+            Err(e) => self.emit_error(Some(key.to_string()), e).await,
         }
     }
 
@@ -122,7 +132,7 @@ impl SyncEngine {
                     // Already synced at this mtime, nothing to do.
                 }
                 Ok(_) => self.upload_local(&path, &key, mtime).await,
-                Err(e) => self.emit_error(e).await,
+                Err(e) => self.emit_error(Some(key), e).await,
             }
         }
     }
@@ -131,7 +141,7 @@ impl SyncEngine {
         let remote_objects = match self.client.list_objects().await {
             Ok(objs) => objs,
             Err(e) => {
-                self.emit_error(e).await;
+                self.emit_error(None, e).await;
                 return;
             }
         };
@@ -146,7 +156,7 @@ impl SyncEngine {
             let known = match self.state.get(&obj.key) {
                 Ok(v) => v,
                 Err(e) => {
-                    self.emit_error(e).await;
+                    self.emit_error(Some(obj.key.clone()), e).await;
                     continue;
                 }
             };
@@ -164,7 +174,7 @@ impl SyncEngine {
         let known = match self.state.all() {
             Ok(v) => v,
             Err(e) => {
-                self.emit_error(e).await;
+                self.emit_error(None, e).await;
                 return;
             }
         };
@@ -201,7 +211,7 @@ impl SyncEngine {
                     match self.state.get(&key) {
                         Ok(Some(_)) => self.queue_pending_delete(&key, false).await,
                         Ok(None) => {}
-                        Err(e) => self.emit_error(e).await,
+                        Err(e) => self.emit_error(Some(key), e).await,
                     }
                 }
                 _ => {}
@@ -210,16 +220,23 @@ impl SyncEngine {
     }
 
     async fn upload_local(&self, path: &Path, key: &str, mtime: i64) {
+        if self.failed_uploads.lock().await.get(key) == Some(&mtime) {
+            // Already reported this exact (key, mtime) failing; stay quiet
+            // until the file changes again or the key clears on success.
+            return;
+        }
+
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                self.emit_error(SyncError::Other(e.to_string())).await;
+                self.emit_error(Some(key.to_string()), SyncError::Other(e.to_string())).await;
                 return;
             }
         };
         let size = bytes.len() as i64;
         match self.client.put_object_bytes(key, bytes).await {
             Ok(()) => {
+                self.failed_uploads.lock().await.remove(key);
                 let etag = match self.client.head_object(key).await {
                     Ok(Some(obj)) => obj.etag,
                     _ => None,
@@ -232,7 +249,7 @@ impl SyncEngine {
                     synced_at: now(),
                 };
                 if let Err(e) = self.state.record(&record) {
-                    self.emit_error(e).await;
+                    self.emit_error(Some(key.to_string()), e).await;
                 } else {
                     let _ = self
                         .events_tx
@@ -240,7 +257,10 @@ impl SyncEngine {
                         .await;
                 }
             }
-            Err(e) => self.emit_error(e).await,
+            Err(e) => {
+                self.failed_uploads.lock().await.insert(key.to_string(), mtime);
+                self.emit_error(Some(key.to_string()), e).await;
+            }
         }
     }
 
@@ -248,18 +268,18 @@ impl SyncEngine {
         let bytes = match self.client.get_object_bytes(&obj.key).await {
             Ok(b) => b,
             Err(e) => {
-                self.emit_error(e).await;
+                self.emit_error(Some(obj.key.clone()), e).await;
                 return;
             }
         };
         let path = self.local_path(&obj.key);
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent) {
-                self.emit_error(SyncError::Other(e.to_string())).await;
+                self.emit_error(Some(obj.key.clone()), SyncError::Other(e.to_string())).await;
                 return;
             }
         if let Err(e) = std::fs::write(&path, &bytes) {
-            self.emit_error(SyncError::Other(e.to_string())).await;
+            self.emit_error(Some(obj.key.clone()), SyncError::Other(e.to_string())).await;
             return;
         }
         let mtime = file_mtime(&path);
@@ -277,7 +297,7 @@ impl SyncEngine {
                     .send(EngineEvent::Downloaded(obj.key.clone()))
                     .await;
             }
-            Err(e) => self.emit_error(e).await,
+            Err(e) => self.emit_error(Some(obj.key.clone()), e).await,
         }
     }
 
@@ -295,8 +315,8 @@ impl SyncEngine {
         }
     }
 
-    async fn emit_error(&self, err: SyncError) {
-        let _ = self.events_tx.send(EngineEvent::Error(err)).await;
+    async fn emit_error(&self, key: Option<String>, error: SyncError) {
+        let _ = self.events_tx.send(EngineEvent::Error { key, error }).await;
     }
 
     fn key_for(&self, path: &Path) -> Option<String> {

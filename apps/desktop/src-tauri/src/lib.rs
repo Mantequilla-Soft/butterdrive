@@ -57,30 +57,36 @@ fn event_payload(event: &EngineEvent) -> serde_json::Value {
             "key": key,
             "originatedRemotely": originated_remotely,
         }),
-        EngineEvent::Error(err) => {
-            let kind = match err {
+        EngineEvent::Error { key, error } => {
+            let kind = match error {
                 SyncError::QuotaExceeded => "quotaExceeded",
                 SyncError::AccountSuspended => "accountSuspended",
-                SyncError::InvalidCredentials => "invalidCredentials",
+                SyncError::AccessKeyNotFound => "accessKeyNotFound",
+                SyncError::SignatureMismatch => "signatureMismatch",
                 SyncError::Other(_) => "error",
             };
-            serde_json::json!({"kind": kind, "message": err.to_string()})
+            serde_json::json!({"kind": kind, "message": error.to_string(), "key": key})
         }
     }
 }
 
 fn handle_engine_event(app: &AppHandle, event: EngineEvent) {
+    eprintln!("[engine-event] {event:?}");
     let _ = app.emit("engine-event", event_payload(&event));
     // Quota/suspension/transport errors and delete confirmations are the
     // moments the user needs to notice even if the status window isn't
     // focused — everything else (uploaded/downloaded) just updates the UI.
     match &event {
-        EngineEvent::Error(err) => {
+        EngineEvent::Error { key, error } => {
+            let body = match key {
+                Some(key) => format!("\"{key}\": {error}"),
+                None => error.to_string(),
+            };
             let _ = app
                 .notification()
                 .builder()
                 .title("Buttercloud sync error")
-                .body(err.to_string())
+                .body(body)
                 .show();
         }
         EngineEvent::PendingDelete { key, .. } => {
@@ -113,7 +119,10 @@ async fn start_engine(app: AppHandle, cfg: AccountConfig) -> Result<(), String> 
     let run_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = engine.run().await {
-            let _ = run_handle.emit("engine-event", event_payload(&EngineEvent::Error(e)));
+            let _ = run_handle.emit(
+                "engine-event",
+                event_payload(&EngineEvent::Error { key: None, error: e }),
+            );
         }
     });
 
@@ -292,12 +301,18 @@ pub fn run() {
                 // The one keychain read per launch: every other place that
                 // needs to know "is an account connected" reads
                 // AppState::has_account instead.
-                if let Ok(Some(cfg)) = creds::load() {
-                    let state: State<AppState> = handle.state();
-                    state
-                        .has_account
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    let _ = start_engine(handle, cfg).await;
+                match creds::load() {
+                    Ok(Some(cfg)) => {
+                        eprintln!("[startup] found saved account, bucket={:?}; starting engine", cfg.bucket);
+                        let state: State<AppState> = handle.state();
+                        state
+                            .has_account
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        let result = start_engine(handle, cfg).await;
+                        eprintln!("[startup] start_engine result: {result:?}");
+                    }
+                    Ok(None) => eprintln!("[startup] no saved account; showing onboarding"),
+                    Err(e) => eprintln!("[startup] creds::load() FAILED: {e}"),
                 }
             });
             Ok(())
