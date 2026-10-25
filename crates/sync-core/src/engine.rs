@@ -39,6 +39,12 @@ impl SyncEngine {
         poll_interval: Duration,
     ) -> (Self, mpsc::Receiver<EngineEvent>) {
         let (events_tx, events_rx) = mpsc::channel(256);
+        // On macOS, `notify`'s FSEvents backend reports paths through their
+        // canonicalized form (e.g. resolving the /var -> /private/var
+        // symlink). If `root` isn't canonicalized too, `key_for` strips the
+        // wrong prefix and silently drops every local-originated event.
+        // Callers are expected to have already created this directory.
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
         (
             Self {
                 client,
@@ -177,7 +183,16 @@ impl SyncEngine {
                 EventKind::Create(_) | EventKind::Modify(_) => {
                     if path.is_file()
                         && let Some(mtime) = file_mtime(path) {
-                            self.upload_local(path, &key, mtime).await;
+                            // A single write can fire several Create/Modify
+                            // events for the same path; skip re-uploading
+                            // when we already synced this exact mtime.
+                            let already_synced = matches!(
+                                self.state.get(&key),
+                                Ok(Some(existing)) if existing.local_mtime == Some(mtime)
+                            );
+                            if !already_synced {
+                                self.upload_local(path, &key, mtime).await;
+                            }
                         }
                 }
                 EventKind::Remove(_) => {
