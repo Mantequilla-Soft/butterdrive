@@ -6,6 +6,7 @@ use sync_core::client::ButtercloudClient;
 use sync_core::config::AccountConfig;
 use sync_core::creds;
 use sync_core::engine::{EngineEvent, SyncEngine};
+use sync_core::error::SyncError;
 use sync_core::state::SyncState;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -51,7 +52,15 @@ fn event_payload(event: &EngineEvent) -> serde_json::Value {
             "key": key,
             "originatedRemotely": originated_remotely,
         }),
-        EngineEvent::Error(message) => serde_json::json!({"kind": "error", "message": message}),
+        EngineEvent::Error(err) => {
+            let kind = match err {
+                SyncError::QuotaExceeded => "quotaExceeded",
+                SyncError::AccountSuspended => "accountSuspended",
+                SyncError::InvalidCredentials => "invalidCredentials",
+                SyncError::Other(_) => "error",
+            };
+            serde_json::json!({"kind": kind, "message": err.to_string()})
+        }
     }
 }
 
@@ -61,12 +70,12 @@ fn handle_engine_event(app: &AppHandle, event: EngineEvent) {
     // moments the user needs to notice even if the status window isn't
     // focused — everything else (uploaded/downloaded) just updates the UI.
     match &event {
-        EngineEvent::Error(message) => {
+        EngineEvent::Error(err) => {
             let _ = app
                 .notification()
                 .builder()
                 .title("Buttercloud sync error")
-                .body(message)
+                .body(err.to_string())
                 .show();
         }
         EngineEvent::PendingDelete { key, .. } => {
@@ -99,7 +108,7 @@ async fn start_engine(app: AppHandle, cfg: AccountConfig) -> Result<(), String> 
     let run_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = engine.run().await {
-            let _ = run_handle.emit("engine-event", event_payload(&EngineEvent::Error(e.to_string())));
+            let _ = run_handle.emit("engine-event", event_payload(&EngineEvent::Error(e)));
         }
     });
 
@@ -175,11 +184,46 @@ fn open_sync_folder(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Opens the account's web dashboard in the system browser — usage, billing
+/// and invoice status all live there (the API for them is JWT-only, and
+/// this client deliberately never touches JWT; see the handoff doc).
+#[tauri::command]
+async fn open_dashboard(app: AppHandle) -> Result<(), String> {
+    let cfg = creds::load()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no account connected".to_string())?;
+    app.opener()
+        .open_url(cfg.endpoint, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Opens an https URL in the system browser — used for the "source & issues"
+/// link so it doesn't navigate the app's own webview.
+#[tauri::command]
+fn open_external(app: AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err("only https URLs may be opened".to_string());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn sync_folder_path(app: AppHandle) -> String {
+    sync_root(&app).to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let open_item = MenuItemBuilder::with_id("open_folder", "Open Buttercloud Folder").build(app)?;
+    let dashboard_item = MenuItemBuilder::with_id("dashboard", "Usage & Billing (Web)").build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&open_item)
+        .item(&dashboard_item)
         .separator()
         .item(&quit_item)
         .build()?;
@@ -190,6 +234,12 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open_folder" => {
                 let _ = open_sync_folder(app.clone());
+            }
+            "dashboard" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = open_dashboard(app).await;
+                });
             }
             "quit" => app.exit(0),
             _ => {}
@@ -215,7 +265,11 @@ pub fn run() {
             sign_out,
             confirm_delete,
             cancel_delete,
-            open_sync_folder
+            open_sync_folder,
+            open_dashboard,
+            open_external,
+            sync_folder_path,
+            app_version
         ])
         .setup(|app| {
             setup_tray(app)?;

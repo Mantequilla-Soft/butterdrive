@@ -19,7 +19,7 @@ pub enum EngineEvent {
     /// A delete was observed (locally or remotely) and is waiting on
     /// `SyncEngine::confirm_delete` / `cancel_delete` before it propagates.
     PendingDelete { key: String, originated_remotely: bool },
-    Error(String),
+    Error(SyncError),
 }
 
 pub struct SyncEngine {
@@ -296,7 +296,7 @@ impl SyncEngine {
     }
 
     async fn emit_error(&self, err: SyncError) {
-        let _ = self.events_tx.send(EngineEvent::Error(err.to_string())).await;
+        let _ = self.events_tx.send(EngineEvent::Error(err)).await;
     }
 
     fn key_for(&self, path: &Path) -> Option<String> {

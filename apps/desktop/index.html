@@ -9,46 +9,109 @@
   </head>
 
   <body>
-    <main class="container">
-      <section id="onboarding" class="screen" hidden>
-        <h1>Connect your Buttercloud account</h1>
-        <p class="hint">
-          Find these in your Buttercloud dashboard under API keys. Use a test
-          account if you're trying this out — local deletes and remote
-          deletes are permanent (no recycle bin yet).
-        </p>
-        <form id="onboarding-form">
-          <label>
-            Bucket name
-            <input id="bucket" name="bucket" autocomplete="off" required />
-          </label>
-          <label>
-            Access key
-            <input id="access-key" name="access-key" autocomplete="off" required />
-          </label>
-          <label>
-            Secret key
-            <input id="secret-key" name="secret-key" type="password" autocomplete="off" required />
-          </label>
-          <button type="submit">Connect</button>
-        </form>
-        <p id="onboarding-error" class="error" hidden></p>
+    <main class="app">
+      <!-- ============ Onboarding ============ -->
+      <section id="onboarding" class="screen onboarding" hidden>
+        <div class="onboarding-card">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64" class="cloud-glyph">
+              <circle cx="23" cy="34" r="8"/>
+              <circle cx="32" cy="27" r="10"/>
+              <circle cx="41" cy="34" r="8"/>
+              <rect x="18" y="33" width="28" height="10" rx="5"/>
+            </svg>
+          </div>
+          <h1>Connect your Buttercloud account</h1>
+          <p class="hint">
+            Find these in your Buttercloud dashboard under API keys. Use a test
+            account if you're trying this out — deletes are permanent on both
+            sides for now (no recycle bin yet).
+          </p>
+          <form id="onboarding-form">
+            <label>
+              Bucket name
+              <input id="bucket" name="bucket" autocomplete="off" required placeholder="my-bucket-ab12cd" />
+            </label>
+            <label>
+              Access key
+              <input id="access-key" name="access-key" autocomplete="off" required placeholder="AKIA…" />
+            </label>
+            <label>
+              Secret key
+              <input id="secret-key" name="secret-key" type="password" autocomplete="off" required />
+            </label>
+            <button type="submit" class="btn btn-primary btn-block">Connect</button>
+          </form>
+          <p id="onboarding-error" class="error" hidden></p>
+        </div>
       </section>
 
-      <section id="status" class="screen" hidden>
-        <header class="status-header">
-          <h1>Buttercloud</h1>
-          <div class="actions">
-            <button id="open-folder">Open folder</button>
-            <button id="sign-out" class="secondary">Sign out</button>
+      <!-- ============ Main shell (status + help) ============ -->
+      <div id="shell" class="shell" hidden>
+        <header class="app-header">
+          <div class="app-header-title">
+            <svg viewBox="0 0 64 64" class="cloud-glyph cloud-glyph-sm" aria-hidden="true">
+              <circle cx="23" cy="34" r="8"/>
+              <circle cx="32" cy="27" r="10"/>
+              <circle cx="41" cy="34" r="8"/>
+              <rect x="18" y="33" width="28" height="10" rx="5"/>
+            </svg>
+            <span>Buttercloud</span>
+            <span id="status-dot" class="status-dot" title="All good"></span>
           </div>
+          <nav class="tabs" role="tablist">
+            <button class="tab is-active" data-tab="status" role="tab" aria-selected="true">Status</button>
+            <button class="tab" data-tab="help" role="tab" aria-selected="false">Help</button>
+          </nav>
         </header>
 
-        <div id="pending-deletes"></div>
+        <!-- ---- Status tab ---- -->
+        <section id="tab-status" class="tab-panel" role="tabpanel">
+          <div id="account-banner" class="banner" hidden></div>
 
-        <h2>Activity</h2>
-        <ul id="activity-log"></ul>
-      </section>
+          <div class="actions-row">
+            <button id="open-folder" class="btn btn-secondary">Open folder</button>
+            <button id="open-dashboard" class="btn btn-secondary">Usage &amp; billing ↗</button>
+            <button id="sign-out" class="btn btn-ghost">Sign out</button>
+          </div>
+
+          <div id="pending-deletes"></div>
+
+          <h2 class="section-title">Activity</h2>
+          <ul id="activity-log" class="activity-log">
+            <li class="empty-state">Nothing yet — drop a file in your Buttercloud folder to get started.</li>
+          </ul>
+        </section>
+
+        <!-- ---- Help tab ---- -->
+        <section id="tab-help" class="tab-panel" hidden role="tabpanel">
+          <h2 class="section-title">How sync works</h2>
+          <ul class="help-list">
+            <li><strong>Local → cloud</strong> is near-instant: a file watcher uploads the moment you add or change a file.</li>
+            <li><strong>Cloud → local</strong> is polled every ~20 seconds (Buttercloud has no push notifications yet), and also checked immediately whenever you open this app.</li>
+            <li><strong>Deletes are never automatic.</strong> If a file disappears on either side, you'll see a confirmation card on the Status tab before it's removed on the other side — there's no recycle bin yet, so this is deliberately conservative.</li>
+          </ul>
+
+          <h2 class="section-title">Usage &amp; billing</h2>
+          <p class="help-text">
+            Storage, bandwidth, and invoice status live on the web dashboard —
+            this app doesn't show them inline to avoid asking for your account
+            password (it only ever uses a scoped API key).
+          </p>
+          <button id="open-dashboard-2" class="btn btn-secondary">Open usage &amp; billing ↗</button>
+
+          <h2 class="section-title">Details</h2>
+          <dl class="meta-list">
+            <div><dt>Synced folder</dt><dd id="meta-folder">—</dd></div>
+            <div><dt>Version</dt><dd id="meta-version">—</dd></div>
+          </dl>
+
+          <h2 class="section-title">Need help?</h2>
+          <p class="help-text">
+            <a id="repo-link" href="#">Source &amp; issues on GitHub ↗</a>
+          </p>
+        </section>
+      </div>
     </main>
   </body>
 </html>

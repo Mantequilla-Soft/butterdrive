@@ -3,7 +3,7 @@ use std::fmt;
 /// Buttercloud's two documented custom 403 codes, plus the generic S3 error
 /// surface. Branch on `Quota`/`Suspended` for user-facing messages; treat
 /// `Other` as a normal transfer failure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SyncError {
     /// Plan storage limit hit (`Code: 'QuotaExceeded'`).
     QuotaExceeded,
