@@ -21,6 +21,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(20);
 
 struct AppState {
     engine: tokio::sync::Mutex<Option<Arc<SyncEngine>>>,
+    // Set once from the single `creds::load()` call in `setup`, kept in sync
+    // by `onboard`/`sign_out`. `has_account` reads this instead of hitting
+    // the OS keychain a second time on every launch — each keychain read is
+    // its own macOS authorization prompt on an unsigned dev build.
+    has_account: std::sync::atomic::AtomicBool,
 }
 
 fn sync_root(app: &AppHandle) -> PathBuf {
@@ -123,13 +128,14 @@ async fn start_engine(app: AppHandle, cfg: AccountConfig) -> Result<(), String> 
 }
 
 #[tauri::command]
-async fn has_account() -> Result<bool, String> {
-    Ok(creds::load().map_err(|e| e.to_string())?.is_some())
+fn has_account(state: State<'_, AppState>) -> bool {
+    state.has_account.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[tauri::command]
 async fn onboard(
     app: AppHandle,
+    state: State<'_, AppState>,
     access_key: String,
     secret_key: String,
     bucket: String,
@@ -138,13 +144,20 @@ async fn onboard(
     let client = ButtercloudClient::connect(&cfg).await;
     client.validate().await.map_err(|e| e.to_string())?;
     creds::save(&cfg).map_err(|e| e.to_string())?;
+    state
+        .has_account
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     start_engine(app, cfg).await
 }
 
 #[tauri::command]
 async fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
     *state.engine.lock().await = None;
-    creds::clear().map_err(|e| e.to_string())
+    creds::clear().map_err(|e| e.to_string())?;
+    state
+        .has_account
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]
@@ -258,6 +271,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             engine: tokio::sync::Mutex::new(None),
+            has_account: std::sync::atomic::AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             has_account,
@@ -275,7 +289,14 @@ pub fn run() {
             setup_tray(app)?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                // The one keychain read per launch: every other place that
+                // needs to know "is an account connected" reads
+                // AppState::has_account instead.
                 if let Ok(Some(cfg)) = creds::load() {
+                    let state: State<AppState> = handle.state();
+                    state
+                        .has_account
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     let _ = start_engine(handle, cfg).await;
                 }
             });
