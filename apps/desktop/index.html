@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Buttercloud</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="container">
+      <section id="onboarding" class="screen" hidden>
+        <h1>Connect your Buttercloud account</h1>
+        <p class="hint">
+          Find these in your Buttercloud dashboard under API keys. Use a test
+          account if you're trying this out — local deletes and remote
+          deletes are permanent (no recycle bin yet).
+        </p>
+        <form id="onboarding-form">
+          <label>
+            Bucket name
+            <input id="bucket" name="bucket" autocomplete="off" required />
+          </label>
+          <label>
+            Access key
+            <input id="access-key" name="access-key" autocomplete="off" required />
+          </label>
+          <label>
+            Secret key
+            <input id="secret-key" name="secret-key" type="password" autocomplete="off" required />
+          </label>
+          <button type="submit">Connect</button>
+        </form>
+        <p id="onboarding-error" class="error" hidden></p>
+      </section>
+
+      <section id="status" class="screen" hidden>
+        <header class="status-header">
+          <h1>Buttercloud</h1>
+          <div class="actions">
+            <button id="open-folder">Open folder</button>
+            <button id="sign-out" class="secondary">Sign out</button>
+          </div>
+        </header>
+
+        <div id="pending-deletes"></div>
+
+        <h2>Activity</h2>
+        <ul id="activity-log"></ul>
+      </section>
+    </main>
+  </body>
+</html>

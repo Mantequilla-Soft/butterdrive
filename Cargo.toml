@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/sync-core", "apps/desktop/src-tauri"]
+
+[workspace.package]
+edition = "2024"
+
+# Tauri's scaffold put this in apps/desktop/src-tauri/Cargo.toml, but profile
+# sections only take effect from the workspace root once a crate is part of a
+# workspace, so it lives here instead.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
