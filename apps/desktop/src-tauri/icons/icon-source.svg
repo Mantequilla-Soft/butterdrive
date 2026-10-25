@@ -1,0 +1,42 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFF8E6"/>
+      <stop offset="100%" stop-color="#FFE9B8"/>
+    </linearGradient>
+    <linearGradient id="cloud" gradientUnits="userSpaceOnUse" x1="512" y1="330" x2="512" y2="700">
+      <stop offset="0%" stop-color="#FFDB6B"/>
+      <stop offset="100%" stop-color="#F0A818"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="30%" cy="18%" r="70%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- shadow -->
+  <ellipse cx="512" cy="708" rx="265" ry="32" fill="#D98E12" opacity="0.16"/>
+
+  <!-- cloud outline layer: same union, uniformly dilated, no gaps/seams -->
+  <g fill="#D98E12">
+    <circle cx="372" cy="552" r="126"/>
+    <circle cx="512" cy="452" r="166"/>
+    <circle cx="650" cy="556" r="130"/>
+    <rect x="292" y="548" width="440" height="140" rx="70"/>
+  </g>
+
+  <!-- cloud fill layer, inset from the outline -->
+  <g fill="url(#cloud)">
+    <circle cx="372" cy="552" r="118"/>
+    <circle cx="512" cy="452" r="158"/>
+    <circle cx="650" cy="556" r="122"/>
+    <rect x="300" y="556" width="424" height="124" rx="62"/>
+  </g>
+
+  <!-- gloss highlight -->
+  <ellipse cx="430" cy="380" rx="110" ry="55" fill="#FFFFFF" opacity="0.4"/>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#sheen)"/>
+</svg>
