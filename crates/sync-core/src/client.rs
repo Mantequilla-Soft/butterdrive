@@ -76,6 +76,29 @@ impl ButtercloudClient {
                 req = req.continuation_token(token);
             }
             let resp = req.send().await.map_err(classify_sdk_error)?;
+
+            // Buttercloud has a confirmed bug where ListObjectsV2's response
+            // body gets silently truncated server-side once it's long
+            // enough, with `Content-Length` matching the truncated body (so
+            // it's not a transport error) and `IsTruncated` wrongly left
+            // `false` — the XML parser accepts what's there without erroring
+            // and we'd otherwise return a partial listing as if it were
+            // complete. That's dangerous here specifically: callers diff
+            // this list against known state to detect remote deletes, so a
+            // silently-short list looks exactly like files being deleted.
+            // `KeyCount` is generated from the same (pre-truncation) object
+            // count as the rest of the body, so a mismatch against what
+            // actually parsed out is the signal this happened.
+            if let Some(reported) = resp.key_count() {
+                let page_len = resp.contents().len() as i32;
+                if page_len != reported {
+                    return Err(SyncError::Other(format!(
+                        "remote listing looks incomplete (server reported {reported} objects, \
+                         only {page_len} were in the response) — see github.com/Mantequilla-Soft/buttercloud/issues/21"
+                    )));
+                }
+            }
+
             for obj in resp.contents() {
                 if let Some(key) = obj.key() {
                     objects.push(RemoteObject {
