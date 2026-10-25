@@ -51,10 +51,17 @@ impl ButtercloudClient {
 
     /// Cheap call to confirm the credentials + bucket actually work, used by
     /// onboarding before credentials are saved to the keychain.
+    ///
+    /// Deliberately uses `ListObjectsV2` rather than `HEAD bucket`: HTTP HEAD
+    /// responses never carry a body, so a HEAD failure gives
+    /// `classify_sdk_error` nothing to read and it can only guess
+    /// `InvalidCredentials` — masking the real cause (quota, suspension, a
+    /// genuinely bad key) behind a wrong message.
     pub async fn validate(&self) -> Result<(), SyncError> {
         self.s3
-            .head_bucket()
+            .list_objects_v2()
             .bucket(&self.bucket)
+            .max_keys(1)
             .send()
             .await
             .map(|_| ())

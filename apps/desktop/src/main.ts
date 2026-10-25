@@ -20,6 +20,25 @@ const metaVersion = document.querySelector<HTMLElement>("#meta-version")!;
 
 const MAX_LOG_ENTRIES = 50;
 
+/// Wraps a promise so it always settles within `ms`, even if whatever it's
+/// waiting on (a Rust command, a system dialog) never resolves — a stuck
+/// onboarding form with no visible error is worse than a timeout message.
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMessage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(timeoutMessage)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 function showScreen(screen: "onboarding" | "shell") {
   onboardingScreen.hidden = screen !== "onboarding";
   shell.hidden = screen !== "shell";
@@ -203,7 +222,11 @@ onboardingForm.addEventListener("submit", async (e) => {
   submitBtn.textContent = "Connecting…";
 
   try {
-    await invoke("onboard", { bucket, accessKey, secretKey });
+    await withTimeout(
+      invoke("onboard", { bucket, accessKey, secretKey }),
+      20000,
+      "Connecting timed out — check your network and try again.",
+    );
     showScreen("shell");
     clearBanner();
     logActivity("uploaded", "✓", "Connected to Buttercloud");
