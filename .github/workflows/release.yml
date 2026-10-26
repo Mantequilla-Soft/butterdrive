@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to release (e.g. v0.2.0) — only needed when running this manually rather than from a tag push"
+        required: false
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos
+            os: macos-latest
+            args: "--target universal-apple-darwin"
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - name: linux
+            os: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+          - name: windows
+            os: windows-latest
+            args: ""
+            rust-targets: ""
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.platform.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      # Creates (or updates, if it already exists) a single draft GitHub
+      # Release shared across all three matrix jobs, with each platform's
+      # installers attached as release assets. Draft means nothing goes
+      # public until a human reviews and publishes it from the Releases tab.
+      - name: Build and attach to draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          args: ${{ matrix.platform.args }}
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Butterdrive ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
