@@ -1,7 +1,20 @@
 use crate::config::AccountConfig;
 use crate::error::{ButtercloudErrorBody, SyncError};
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_smithy_runtime_api::http::Response as HttpResponse;
+use std::path::Path;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::task::JoinSet;
+
+/// Files bigger than this go up as a multipart upload instead of one PUT.
+/// `s3.3speak.tv` sits behind Cloudflare, which rejects any single request
+/// body over 100 MB, so one big PUT fails outright no matter what the gateway
+/// would accept. Kept well under that cap since each part is held in memory
+/// while it's sent (`PART_SIZE * PART_CONCURRENCY` at most per upload).
+pub const MULTIPART_THRESHOLD: u64 = PART_SIZE;
+pub const PART_SIZE: u64 = 16 * 1024 * 1024;
+const PART_CONCURRENCY: usize = 4;
 
 /// One object as it comes back from `ListObjectsV2`.
 #[derive(Debug, Clone)]
@@ -130,6 +143,144 @@ impl ButtercloudClient {
             .map_err(classify_sdk_error)
     }
 
+    /// Uploads a local file, picking a single PUT or a multipart upload by
+    /// size. Returns the number of bytes uploaded.
+    pub async fn upload_file(&self, key: &str, path: &Path) -> Result<u64, SyncError> {
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| SyncError::Other(e.to_string()))?
+            .len();
+        if size <= MULTIPART_THRESHOLD {
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|e| SyncError::Other(e.to_string()))?;
+            let len = bytes.len() as u64;
+            self.put_object_bytes(key, bytes).await?;
+            return Ok(len);
+        }
+        self.upload_multipart(key, path, size).await?;
+        Ok(size)
+    }
+
+    async fn upload_multipart(&self, key: &str, path: &Path, size: u64) -> Result<(), SyncError> {
+        let upload_id = self
+            .s3
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(classify_sdk_error)?
+            .upload_id
+            .ok_or_else(|| SyncError::Other("server returned no upload id".to_string()))?;
+
+        let result = async {
+            let parts = self.upload_parts(key, path, size, &upload_id).await?;
+            self.s3
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(parts)).build())
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(classify_sdk_error)
+        }
+        .await;
+
+        if result.is_err() {
+            // Best-effort, for a failure at any step after creation (parts or
+            // completion): frees the parts already stored, which otherwise take
+            // up space on the storage node without showing up anywhere.
+            let _ = self
+                .s3
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+        }
+        result
+    }
+
+    /// Sends every part, up to `PART_CONCURRENCY` at a time, each read from
+    /// disk on its own so a large file is never held in memory whole. Parts
+    /// go up as in-memory bodies, same as `put_object_bytes`: a streamed file
+    /// body makes the SDK switch to aws-chunked encoding, which the gateway
+    /// isn't known to handle. Transient failures are retried by the SDK's own
+    /// retry policy, per part.
+    async fn upload_parts(
+        &self,
+        key: &str,
+        path: &Path,
+        size: u64,
+        upload_id: &str,
+    ) -> Result<Vec<CompletedPart>, SyncError> {
+        let part_count = size.div_ceil(PART_SIZE);
+        let mut parts = Vec::with_capacity(part_count as usize);
+        let mut in_flight = JoinSet::new();
+        let mut next: u64 = 1;
+        let mut first_error: Option<SyncError> = None;
+
+        loop {
+            while first_error.is_none() && next <= part_count && in_flight.len() < PART_CONCURRENCY {
+                let offset = (next - 1) * PART_SIZE;
+                let len = PART_SIZE.min(size - offset);
+                let (s3, bucket, key, upload_id, path) = (
+                    self.s3.clone(),
+                    self.bucket.clone(),
+                    key.to_string(),
+                    upload_id.to_string(),
+                    path.to_path_buf(),
+                );
+                let part_number = next as i32;
+                in_flight.spawn(async move {
+                    let body = read_range(&path, offset, len).await?;
+                    let resp = s3
+                        .upload_part()
+                        .bucket(bucket)
+                        .key(key)
+                        .upload_id(upload_id)
+                        .part_number(part_number)
+                        .body(ByteStream::from(body))
+                        .send()
+                        .await
+                        .map_err(classify_sdk_error)?;
+                    Ok::<_, SyncError>(
+                        CompletedPart::builder()
+                            .part_number(part_number)
+                            .set_e_tag(resp.e_tag)
+                            .build(),
+                    )
+                });
+                next += 1;
+            }
+
+            // After a failure, stop starting parts but let the ones in flight
+            // finish rather than cancelling them mid-request: a cancelled part
+            // can still land server-side after the caller's abort, leaving an
+            // orphan behind it.
+            let err = match in_flight.join_next().await {
+                None => break,
+                Some(Ok(Ok(part))) => {
+                    parts.push(part);
+                    continue;
+                }
+                Some(Ok(Err(e))) => e,
+                Some(Err(e)) => SyncError::Other(e.to_string()),
+            };
+            first_error.get_or_insert(err);
+        }
+
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+        parts.sort_by_key(|p| p.part_number);
+        Ok(parts)
+    }
+
     pub async fn get_object_bytes(&self, key: &str) -> Result<Vec<u8>, SyncError> {
         let resp = self
             .s3
@@ -189,6 +340,22 @@ impl ButtercloudClient {
         };
         self.put_object_bytes(&key, Vec::new()).await
     }
+}
+
+/// Reads exactly `len` bytes at `offset`. Errors (rather than sending a short
+/// part) if the file shrank since its size was read.
+async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, SyncError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| SyncError::Other(e.to_string()))?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|e| SyncError::Other(e.to_string()))?;
+    let mut buf = vec![0u8; len as usize];
+    file.read_exact(&mut buf)
+        .await
+        .map_err(|e| SyncError::Other(format!("file changed while uploading: {e}")))?;
+    Ok(buf)
 }
 
 fn is_not_found<E>(err: &aws_sdk_s3::error::SdkError<E, HttpResponse>) -> bool {

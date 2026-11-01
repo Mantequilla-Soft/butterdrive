@@ -15,6 +15,9 @@ use tokio::time::timeout;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const WAIT: Duration = Duration::from_secs(15);
+/// Test 5's upload has to cross the real uplink (and Cloudflare, against
+/// production), so it gets far longer than the small-file events.
+const LARGE_UPLOAD_WAIT: Duration = Duration::from_secs(120);
 
 #[tokio::main]
 async fn main() {
@@ -93,6 +96,21 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     pass &= check(!downloaded_path.exists(), "remote-origin.txt removed locally after confirm_delete");
 
+    // --- 5. large local file -> multipart upload ---
+    // Over MULTIPART_THRESHOLD, so this goes up in parts — the path that keeps
+    // files over Cloudflare's 100 MB request cap uploadable. Written outside the
+    // sync root and renamed in so the watcher never sees a half-written file.
+    println!("\n== test 5: large local file -> multipart upload ==");
+    let big_len = (sync_core::client::PART_SIZE * 2 + 12_345) as usize;
+    let big_bytes: Vec<u8> = (0..big_len).map(|i| (i % 251) as u8).collect();
+    let staging = root.with_extension("big.staging");
+    std::fs::write(&staging, &big_bytes).unwrap();
+    std::fs::rename(&staging, root.join("big.bin")).unwrap();
+    pass &= expect_event_within(&mut events, |e| matches!(e, EngineEvent::Uploaded(k) if k == "big.bin"), LARGE_UPLOAD_WAIT).await;
+    let remote = probe_client.get_object_bytes("big.bin").await.unwrap_or_default();
+    pass &= check(remote.len() == big_len, "big.bin has the full size remotely");
+    pass &= check(remote == big_bytes, "big.bin's remote content matches byte for byte");
+
     engine_task.abort();
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&db_path);
@@ -100,6 +118,7 @@ async fn main() {
     // belt-and-suspenders: make sure the bucket is clean even if an assertion above failed early
     let _ = probe_client.delete_object("hello.txt").await;
     let _ = probe_client.delete_object("remote-origin.txt").await;
+    let _ = probe_client.delete_object("big.bin").await;
 
     println!("\n== result ==");
     if pass {
@@ -118,7 +137,15 @@ async fn expect_event<F: Fn(&EngineEvent) -> bool>(
     rx: &mut tokio::sync::mpsc::Receiver<EngineEvent>,
     pred: F,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + WAIT;
+    expect_event_within(rx, pred, WAIT).await
+}
+
+async fn expect_event_within<F: Fn(&EngineEvent) -> bool>(
+    rx: &mut tokio::sync::mpsc::Receiver<EngineEvent>,
+    pred: F,
+    wait: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
