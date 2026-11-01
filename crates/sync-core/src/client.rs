@@ -174,9 +174,9 @@ impl ButtercloudClient {
             .upload_id
             .ok_or_else(|| SyncError::Other("server returned no upload id".to_string()))?;
 
-        match self.upload_parts(key, path, size, &upload_id).await {
-            Ok(parts) => self
-                .s3
+        let result = async {
+            let parts = self.upload_parts(key, path, size, &upload_id).await?;
+            self.s3
                 .complete_multipart_upload()
                 .bucket(&self.bucket)
                 .key(key)
@@ -185,21 +185,24 @@ impl ButtercloudClient {
                 .send()
                 .await
                 .map(|_| ())
-                .map_err(classify_sdk_error),
-            Err(e) => {
-                // Best-effort: frees the parts already stored, which otherwise
-                // take up space on the storage node without showing up anywhere.
-                let _ = self
-                    .s3
-                    .abort_multipart_upload()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .upload_id(&upload_id)
-                    .send()
-                    .await;
-                Err(e)
-            }
+                .map_err(classify_sdk_error)
         }
+        .await;
+
+        if result.is_err() {
+            // Best-effort, for a failure at any step after creation (parts or
+            // completion): frees the parts already stored, which otherwise take
+            // up space on the storage node without showing up anywhere.
+            let _ = self
+                .s3
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+        }
+        result
     }
 
     /// Sends every part, up to `PART_CONCURRENCY` at a time, each read from
@@ -219,9 +222,10 @@ impl ButtercloudClient {
         let mut parts = Vec::with_capacity(part_count as usize);
         let mut in_flight = JoinSet::new();
         let mut next: u64 = 1;
+        let mut first_error: Option<SyncError> = None;
 
         loop {
-            while next <= part_count && in_flight.len() < PART_CONCURRENCY {
+            while first_error.is_none() && next <= part_count && in_flight.len() < PART_CONCURRENCY {
                 let offset = (next - 1) * PART_SIZE;
                 let len = PART_SIZE.min(size - offset);
                 let (s3, bucket, key, upload_id, path) = (
@@ -254,15 +258,25 @@ impl ButtercloudClient {
                 next += 1;
             }
 
-            match in_flight.join_next().await {
+            // After a failure, stop starting parts but let the ones in flight
+            // finish rather than cancelling them mid-request: a cancelled part
+            // can still land server-side after the caller's abort, leaving an
+            // orphan behind it.
+            let err = match in_flight.join_next().await {
                 None => break,
-                Some(Ok(Ok(part))) => parts.push(part),
-                // Dropping the JoinSet on return aborts the parts still in flight.
-                Some(Ok(Err(e))) => return Err(e),
-                Some(Err(e)) => return Err(SyncError::Other(e.to_string())),
-            }
+                Some(Ok(Ok(part))) => {
+                    parts.push(part);
+                    continue;
+                }
+                Some(Ok(Err(e))) => e,
+                Some(Err(e)) => SyncError::Other(e.to_string()),
+            };
+            first_error.get_or_insert(err);
         }
 
+        if let Some(e) = first_error {
+            return Err(e);
+        }
         parts.sort_by_key(|p| p.part_number);
         Ok(parts)
     }
