@@ -9,6 +9,11 @@ on:
         description: "Version tag to release (e.g. v0.2.0) — only needed when running this manually rather than from a tag push"
         required: false
 
+# tauri-action creates the GitHub Release and uploads installers to it, which
+# the default read-only GITHUB_TOKEN is not allowed to do.
+permissions:
+  contents: write
+
 jobs:
   release:
     strategy:
