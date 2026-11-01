@@ -9,8 +9,48 @@ on:
         description: "Version tag to release (e.g. v0.2.0) — only needed when running this manually rather than from a tag push"
         required: false
 
+permissions:
+  contents: read
+
 jobs:
+  # Creates the single draft release up front so the three build jobs below
+  # all upload into it. Left to tauri-action, each matrix job looks up the
+  # release and creates it if missing, and two jobs finishing together can
+  # each create their own draft, splitting the installers across them.
+  # Reuses an existing release for the tag, so re-running the workflow
+  # doesn't make a second one. Draft means nothing goes public until a
+  # human reviews and publishes it from the Releases tab.
+  create-release:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.release.outputs.id }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | "\(.id) \(.tag_name)"' \
+            | awk -v tag="$TAG" '$2 == tag { print $1; exit }')
+          if [ -z "$id" ]; then
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$TAG" \
+              -f target_commitish="$GITHUB_SHA" \
+              -f name="Butterdrive $TAG" \
+              -F draft=true \
+              -F prerelease=false \
+              --jq .id)
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: create-release
+    # tauri-action uploads each platform's installers to the release.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +69,11 @@ jobs:
             rust-targets: ""
     runs-on: ${{ matrix.platform.os }}
     steps:
+      # Nothing here needs git credentials, so don't leave the write-scoped
+      # token on disk where npm or Cargo build scripts could read it.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         if: matrix.platform.name == 'linux'
@@ -65,10 +109,6 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
-      # Creates (or updates, if it already exists) a single draft GitHub
-      # Release shared across all three matrix jobs, with each platform's
-      # installers attached as release assets. Draft means nothing goes
-      # public until a human reviews and publishes it from the Releases tab.
       - name: Build and attach to draft release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -76,7 +116,4 @@ jobs:
         with:
           projectPath: apps/desktop
           args: ${{ matrix.platform.args }}
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: "Butterdrive ${{ github.event.inputs.tag || github.ref_name }}"
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release-id }}
