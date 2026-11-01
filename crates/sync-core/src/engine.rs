@@ -226,16 +226,9 @@ impl SyncEngine {
             return;
         }
 
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.emit_error(Some(key.to_string()), SyncError::Other(e.to_string())).await;
-                return;
-            }
-        };
-        let size = bytes.len() as i64;
-        match self.client.put_object_bytes(key, bytes).await {
-            Ok(()) => {
+        match self.client.upload_file(key, path).await {
+            Ok(size) => {
+                let size = size as i64;
                 self.failed_uploads.lock().await.remove(key);
                 let etag = match self.client.head_object(key).await {
                     Ok(Some(obj)) => obj.etag,
